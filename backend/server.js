@@ -10,6 +10,12 @@ const {
   createOrUpdateProfile,
   getPracticeProgressByEmail,
   upsertPracticeProgressResult,
+  seedPracticeProgressForEmail,
+  normalizeCareerPath,
+  recordActivity,
+  upsertUserSnapshot,
+  getUserIdentity,
+  updateUserLoginMetadata,
 } = require('./database');
 
 const app = express();
@@ -94,38 +100,7 @@ const recommendationTemplates = {
   },
 };
 
-const normalizeTargetCareer = (value) => {
-  const text = String(value || '').trim().toLowerCase();
-
-  if (!text) {
-    return '';
-  }
-
-  const aliasEntry = Object.entries(careerAliases).find(([, aliases]) =>
-    aliases.some((alias) => text.includes(alias)),
-  );
-
-  if (!aliasEntry) {
-    return '';
-  }
-
-  const [matchedKey] = aliasEntry;
-
-  if (matchedKey === 'engineering') {
-    return 'Engineering';
-  }
-  if (matchedKey === 'medical') {
-    return 'Medical';
-  }
-  if (matchedKey === 'commerce') {
-    return 'Commerce';
-  }
-  if (matchedKey === 'design') {
-    return 'Design';
-  }
-
-  return '';
-};
+const normalizeTargetCareer = (value) => normalizeCareerPath(value);
 
 const buildRecommendedCareers = ({ targetCareer, classLevel, interests }) => {
   const careers = {
@@ -420,6 +395,36 @@ app.get('/api/recommendations', (req, res) => {
   const classLevel = typeof req.query.classLevel === 'string' ? req.query.classLevel : '';
   const interests = typeof req.query.interests === 'string' ? req.query.interests : '';
   const location = typeof req.query.location === 'string' ? req.query.location : '';
+  const email = typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+
+  if (isValidEmail(email)) {
+    getUserIdentity(email)
+      .then((identity) => Promise.all([
+        recordActivity({
+          email,
+          userId: identity?.id || null,
+          action: 'RECOMMENDATION_GENERATED',
+          entityType: 'recommendations',
+          entityId: email,
+          payload: { targetCareer, classLevel, interests, location },
+        }),
+        upsertUserSnapshot({
+          email,
+          userId: identity?.id || null,
+          category: 'recommendations',
+          payload: {
+            targetCareer,
+            classLevel,
+            interests,
+            location,
+            careers: buildRecommendedCareers({ targetCareer, classLevel, interests }),
+            reasons: buildRecommendationReasons({ targetCareer, location }),
+            assessmentQuestions: buildAssessmentQuestions({ targetCareer }),
+          },
+        }),
+      ]))
+      .catch(() => {});
+  }
 
   return res.status(200).json({
     careers: buildRecommendedCareers({ targetCareer, classLevel, interests }),
@@ -455,7 +460,8 @@ app.get('/api/profile', async (req, res) => {
           gender: profileRow.gender || '',
           classLevel: profileRow.classLevel || '',
           interests: profileRow.interests || '',
-          targetCareer: profileRow.targetCareer || '',
+          targetCareer: normalizeTargetCareer(profileRow.targetCareer || profileRow.career || '') || profileRow.targetCareer || profileRow.career || '',
+          career: normalizeTargetCareer(profileRow.targetCareer || profileRow.career || '') || profileRow.career || profileRow.targetCareer || '',
           location: profileRow.location || '',
           photoUrl: profileRow.photoUrl || '',
         }
@@ -474,6 +480,7 @@ app.get('/api/profile', async (req, res) => {
           classLevel: '',
           interests: '',
           targetCareer: '',
+          career: '',
           location: '',
           photoUrl: '',
         };
@@ -505,11 +512,13 @@ app.post('/api/profile', async (req, res) => {
     }
 
     const normalizedProfile = {
+      username: String(profile.username || '').trim() || normalizedEmail.split('@')[0],
       fullName: String(profile.fullName || '').trim(),
       studentId: String(profile.studentId || '').trim(),
       program: String(profile.program || '').trim(),
       fatherName: String(profile.fatherName || '').trim(),
       motherName: String(profile.motherName || '').trim(),
+      phoneNumber: String(profile.phoneNumber || profile.contactNo || '').trim(),
       permanentAddress: String(profile.permanentAddress || '').trim(),
       correspondenceAddress: String(profile.correspondenceAddress || '').trim(),
       contactNo: String(profile.contactNo || '').trim(),
@@ -518,12 +527,42 @@ app.post('/api/profile', async (req, res) => {
       gender: String(profile.gender || '').trim(),
       classLevel: String(profile.classLevel || '').trim(),
       interests: String(profile.interests || '').trim(),
-      targetCareer: String(profile.targetCareer || '').trim(),
+      bio: String(profile.bio || '').trim(),
+      country: String(profile.country || '').trim(),
+      state: String(profile.state || '').trim(),
+      city: String(profile.city || '').trim(),
+      targetCareer: normalizeTargetCareer(profile.targetCareer || profile.career || '') || String(profile.targetCareer || '').trim(),
+      career: normalizeTargetCareer(profile.targetCareer || profile.career || '') || String(profile.targetCareer || '').trim(),
       location: String(profile.location || '').trim(),
       photoUrl: String(profile.photoUrl || '').trim(),
     };
 
     await createOrUpdateProfile(normalizedEmail, normalizedProfile);
+    const identity = await getUserIdentity(normalizedEmail);
+
+    await seedPracticeProgressForEmail({
+      email: normalizedEmail,
+      careerPath: normalizedProfile.targetCareer,
+    });
+
+    await Promise.all([
+      recordActivity({
+        email: normalizedEmail,
+        userId: identity?.id || null,
+        action: 'PROFILE_SAVED',
+        entityType: 'profile',
+        entityId: normalizedEmail,
+        payload: normalizedProfile,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+      }),
+      upsertUserSnapshot({
+        email: normalizedEmail,
+        userId: identity?.id || null,
+        category: 'profile',
+        payload: normalizedProfile,
+      }),
+    ]);
 
     return res.status(200).json({
       message: 'Profile saved successfully.',
@@ -543,7 +582,20 @@ app.get('/api/practice-progress', async (req, res) => {
       return res.status(400).json({ message: 'Valid email is required to load practice progress.' });
     }
 
-    const progress = await getPracticeProgressByEmail(email);
+    let progress = await getPracticeProgressByEmail(email);
+
+    if (progress.length === 0) {
+      const profile = await getProfileByEmail(email);
+      const careerPath = profile?.targetCareer || profile?.career || 'Engineering';
+
+      await seedPracticeProgressForEmail({
+        email,
+        careerPath,
+      });
+
+      progress = await getPracticeProgressByEmail(email);
+    }
+
     return res.status(200).json({ email, progress });
   } catch (error) {
     return res.status(500).json({ message: 'Error loading practice progress.', error: error.message });
@@ -581,9 +633,92 @@ app.post('/api/practice-progress', async (req, res) => {
       passed: score >= 60,
     });
 
+    const identity = await getUserIdentity(email);
+
+    await Promise.all([
+      recordActivity({
+        email,
+        userId: identity?.id || null,
+        action: 'PRACTICE_PROGRESS_SAVED',
+        entityType: 'practice_progress',
+        entityId: `${subject}:${level}`,
+        payload: { subject, level, score, passed: score >= 60, progress: saved },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+      }),
+      upsertUserSnapshot({
+        email,
+        userId: identity?.id || null,
+        category: 'practice_progress',
+        payload: { subject, level, score, passed: score >= 60, progress: saved },
+      }),
+    ]);
+
     return res.status(200).json({ message: 'Practice progress saved.', progress: saved });
   } catch (error) {
     return res.status(500).json({ message: 'Error saving practice progress.', error: error.message });
+  }
+});
+
+app.post('/api/study-plan', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const plannerGoal = typeof req.body?.plannerGoal === 'string' ? req.body.plannerGoal.trim() : '';
+    const studyPlan = Array.isArray(req.body?.studyPlan) ? req.body.studyPlan.filter((item) => typeof item === 'string') : [];
+    const completedPlanItems = Array.isArray(req.body?.completedPlanItems)
+      ? req.body.completedPlanItems.filter((item) => typeof item === 'string')
+      : [];
+    const studyHours = Number(req.body?.studyHours);
+    const syllabusDone = Number(req.body?.syllabusDone);
+    const subjectScores = req.body?.subjectScores && typeof req.body.subjectScores === 'object' ? req.body.subjectScores : {};
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Valid email is required to save study plan.' });
+    }
+
+    const identity = await getUserIdentity(email);
+    const completionPercent = studyPlan.length > 0 ? Math.round((completedPlanItems.length / studyPlan.length) * 100) : 0;
+    const remainingTaskCount = Math.max(0, studyPlan.length - completedPlanItems.length);
+
+    const payload = {
+      plannerGoal,
+      studyPlan,
+      completedPlanItems,
+      studyHours: Number.isFinite(studyHours) ? Math.max(0, Math.min(16, studyHours)) : 0,
+      syllabusDone: Number.isFinite(syllabusDone) ? Math.max(0, Math.min(100, syllabusDone)) : 0,
+      completionPercent,
+      remainingTaskCount,
+      subjectScores,
+      weakSubjects: Object.entries(subjectScores)
+        .filter(([, score]) => Number(score) < 60)
+        .map(([subject, score]) => ({ subject, score: Number(score) })),
+    };
+
+    await Promise.all([
+      recordActivity({
+        email,
+        userId: identity?.id || null,
+        action: 'STUDY_PLAN_SNAPSHOT_UPDATED',
+        entityType: 'study_plan',
+        entityId: plannerGoal || email,
+        payload,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+      }),
+      upsertUserSnapshot({
+        email,
+        userId: identity?.id || null,
+        category: 'study_plan',
+        payload,
+      }),
+    ]);
+
+    return res.status(200).json({
+      message: 'Study plan saved successfully.',
+      snapshot: payload,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Error saving study plan.', error: error.message });
   }
 });
 
@@ -617,6 +752,39 @@ app.post('/api/login', async (req, res) => {
       const salt = crypto.randomBytes(16).toString('hex');
       const passwordHash = hashPassword(password, salt);
       await createUser(normalizedEmail, salt, passwordHash);
+      const createdUser = await getUserByEmail(normalizedEmail);
+
+      await updateUserLoginMetadata({
+        email: normalizedEmail,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+      });
+
+      await Promise.all([
+        recordActivity({
+          email: normalizedEmail,
+          userId: createdUser?.id || null,
+          action: 'REGISTRATION_SUCCESS',
+          entityType: 'auth',
+          entityId: normalizedEmail,
+          payload: { rememberMe: Boolean(rememberMe) },
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent') || null,
+        }),
+        upsertUserSnapshot({
+          email: normalizedEmail,
+          userId: createdUser?.id || null,
+          category: 'auth',
+          payload: {
+            email: normalizedEmail,
+            username: createdUser?.username || normalizedEmail.split('@')[0],
+            emailVerified: Number(createdUser?.emailVerified) || 0,
+            accountStatus: createdUser?.accountStatus || 'active',
+            lastLoginAt: new Date().toISOString(),
+            loginCount: 1,
+          },
+        }),
+      ]);
 
       return res.status(200).json({
         message: `New account created and logged in as ${normalizedEmail}.`,
@@ -630,6 +798,38 @@ app.post('/api/login', async (req, res) => {
     const incomingPasswordHash = hashPassword(password, existingUser.salt);
 
     if (incomingPasswordHash === existingUser.passwordHash) {
+      await updateUserLoginMetadata({
+        email: normalizedEmail,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+      });
+
+      await Promise.all([
+        recordActivity({
+          email: normalizedEmail,
+          userId: existingUser.id || null,
+          action: 'LOGIN_SUCCESS',
+          entityType: 'auth',
+          entityId: normalizedEmail,
+          payload: { rememberMe: Boolean(rememberMe) },
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent') || null,
+        }),
+        upsertUserSnapshot({
+          email: normalizedEmail,
+          userId: existingUser.id || null,
+          category: 'auth',
+          payload: {
+            email: normalizedEmail,
+            username: existingUser.username || normalizedEmail.split('@')[0],
+            emailVerified: Number(existingUser.emailVerified) || 0,
+            accountStatus: existingUser.accountStatus || 'active',
+            lastLoginAt: new Date().toISOString(),
+            loginCount: (Number(existingUser.loginCount) || 0) + 1,
+          },
+        }),
+      ]);
+
       return res.status(200).json({
         message: `Login successful. Welcome ${normalizedEmail}.`,
         email: normalizedEmail,
@@ -650,6 +850,7 @@ app.post('/api/chat', async (req, res) => {
   try {
     const incomingMessage = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
     if (!incomingMessage) {
       return res.status(400).json({
@@ -666,6 +867,28 @@ app.post('/api/chat', async (req, res) => {
     try {
       const reply = await requestChatReply(incomingMessage, history);
 
+      if (isValidEmail(email)) {
+        const identity = await getUserIdentity(email);
+        await Promise.all([
+          recordActivity({
+            email,
+            userId: identity?.id || null,
+            action: 'CHAT_MESSAGE_PROCESSED',
+            entityType: 'chat',
+            entityId: email,
+            payload: { message: incomingMessage, reply, provider: chatProvider, fallbackUsed: false },
+            ipAddress: req.ip,
+            userAgent: req.get('user-agent') || null,
+          }),
+          upsertUserSnapshot({
+            email,
+            userId: identity?.id || null,
+            category: 'chat',
+            payload: { message: incomingMessage, reply, provider: chatProvider, fallbackUsed: false },
+          }),
+        ]);
+      }
+
       return res.status(200).json({
         provider: chatProvider,
         fallbackUsed: false,
@@ -673,6 +896,28 @@ app.post('/api/chat', async (req, res) => {
       });
     } catch (providerError) {
       const fallbackReply = requestOfflineReply(incomingMessage);
+
+      if (isValidEmail(email)) {
+        const identity = await getUserIdentity(email);
+        await Promise.all([
+          recordActivity({
+            email,
+            userId: identity?.id || null,
+            action: 'CHAT_MESSAGE_PROCESSED',
+            entityType: 'chat',
+            entityId: email,
+            payload: { message: incomingMessage, reply: fallbackReply, provider: `${chatProvider}-fallback`, fallbackUsed: true },
+            ipAddress: req.ip,
+            userAgent: req.get('user-agent') || null,
+          }),
+          upsertUserSnapshot({
+            email,
+            userId: identity?.id || null,
+            category: 'chat',
+            payload: { message: incomingMessage, reply: fallbackReply, provider: `${chatProvider}-fallback`, fallbackUsed: true },
+          }),
+        ]);
+      }
 
       return res.status(200).json({
         provider: `${chatProvider}-fallback`,
@@ -683,6 +928,29 @@ app.post('/api/chat', async (req, res) => {
     }
   } catch (error) {
     const fallbackReply = requestOfflineReply(req.body?.message || '');
+
+    if (isValidEmail(req.body?.email || '')) {
+      const email = String(req.body.email).trim().toLowerCase();
+      const identity = await getUserIdentity(email);
+      await Promise.all([
+        recordActivity({
+          email,
+          userId: identity?.id || null,
+          action: 'CHAT_MESSAGE_PROCESSED',
+          entityType: 'chat',
+          entityId: email,
+          payload: { message: req.body?.message || '', reply: fallbackReply, provider: 'offline-fallback', fallbackUsed: true },
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent') || null,
+        }),
+        upsertUserSnapshot({
+          email,
+          userId: identity?.id || null,
+          category: 'chat',
+          payload: { message: req.body?.message || '', reply: fallbackReply, provider: 'offline-fallback', fallbackUsed: true },
+        }),
+      ]);
+    }
 
     return res.status(200).json({
       provider: 'offline-fallback',

@@ -12,6 +12,297 @@ const dbConfig = {
   queueLimit: 0,
 };
 
+const userColumnDefinitions = [
+  ['username', 'VARCHAR(100)'],
+  ['emailVerified', 'TINYINT(1) NOT NULL DEFAULT 0'],
+  ['accountStatus', "VARCHAR(20) NOT NULL DEFAULT 'active'"],
+  ['lastLoginAt', 'TIMESTAMP NULL DEFAULT NULL'],
+  ['lastLoginIp', 'VARCHAR(45)'],
+  ['lastLoginUserAgent', 'TEXT'],
+  ['loginCount', 'INT NOT NULL DEFAULT 0'],
+];
+
+const profileColumnDefinitions = [
+  ['username', 'VARCHAR(100)'],
+  ['fullName', 'VARCHAR(255)'],
+  ['studentId', 'VARCHAR(100)'],
+  ['program', 'VARCHAR(255)'],
+  ['fatherName', 'VARCHAR(255)'],
+  ['motherName', 'VARCHAR(255)'],
+  ['phoneNumber', 'VARCHAR(20)'],
+  ['permanentAddress', 'TEXT'],
+  ['correspondenceAddress', 'TEXT'],
+  ['contactNo', 'VARCHAR(20)'],
+  ['dateOfBirth', 'VARCHAR(50)'],
+  ['gender', 'VARCHAR(50)'],
+  ['classLevel', 'VARCHAR(100)'],
+  ['interests', 'TEXT'],
+  ['bio', 'TEXT'],
+  ['country', 'VARCHAR(100)'],
+  ['state', 'VARCHAR(100)'],
+  ['city', 'VARCHAR(100)'],
+  ['targetCareer', 'VARCHAR(255)'],
+  ['career', 'VARCHAR(255)'],
+  ['location', 'VARCHAR(255)'],
+  ['photoUrl', 'LONGTEXT'],
+  ['profilePictureUrl', 'LONGTEXT'],
+];
+
+const careerPathAliases = {
+  Engineering: ['engineering', 'engineer', 'engeneering', 'engg', 'btech', 'technology'],
+  Medical: ['medical', 'doctor', 'mbbs', 'healthcare'],
+  Commerce: ['commerce', 'bcom', 'business', 'finance', 'accounting'],
+  Design: ['design', 'designer', 'architecture', 'animation', 'ui', 'ux'],
+};
+
+const normalizeCareerPath = (value) => {
+  const text = String(value || '').trim().toLowerCase();
+
+  if (!text) {
+    return '';
+  }
+
+  const entry = Object.entries(careerPathAliases).find(([, aliases]) =>
+    aliases.some((alias) => text.includes(alias)),
+  );
+
+  return entry ? entry[0] : '';
+};
+
+const practiceProgressCurricula = {
+  Engineering: ['Mathematics', 'Physics', 'Chemistry'],
+  Medical: ['Biology', 'Chemistry', 'Physics'],
+  Commerce: ['Accountancy', 'Economics', 'Business Studies'],
+  Design: ['Design Fundamentals', 'Color Theory', 'Composition'],
+};
+
+const getPracticeProgressSubjects = (careerPath) => {
+  const normalizedCareerPath = normalizeCareerPath(careerPath) || 'Engineering';
+  return practiceProgressCurricula[normalizedCareerPath] || practiceProgressCurricula.Engineering;
+};
+
+const activityLogDefinitions = `
+  CREATE TABLE IF NOT EXISTS activity_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    userId INT NULL,
+    email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+    action VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    entityType VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+    entityId VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+    payload LONGTEXT,
+    ipAddress VARCHAR(45),
+    userAgent TEXT,
+    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_activity_email (email),
+    INDEX idx_activity_userId (userId),
+    INDEX idx_activity_action (action),
+    CONSTRAINT activity_logs_ibfk_1 FOREIGN KEY (userId) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT activity_logs_ibfk_2 FOREIGN KEY (email) REFERENCES users(email) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const userDataSnapshotDefinitions = `
+  CREATE TABLE IF NOT EXISTS user_data_snapshots (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    userId INT NULL,
+    email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+    category VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    payload LONGTEXT NOT NULL,
+    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_snapshot_user_category (email, category),
+    INDEX idx_snapshot_userId (userId),
+    INDEX idx_snapshot_category (category),
+    CONSTRAINT user_data_snapshots_ibfk_1 FOREIGN KEY (userId) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT user_data_snapshots_ibfk_2 FOREIGN KEY (email) REFERENCES users(email) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const ensureTableColumn = async (connection, tableName, columnName, columnDefinition) => {
+  const [rows] = await connection.query(`SHOW COLUMNS FROM \`${tableName}\` LIKE ?`, [columnName]);
+
+  if (rows.length === 0) {
+    await connection.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDefinition}`);
+    return true;
+  }
+
+  return false;
+};
+
+const ensureColumns = async (connection, tableName, definitions) => {
+  for (const [columnName, columnDefinition] of definitions) {
+    await ensureTableColumn(connection, tableName, columnName, columnDefinition);
+  }
+};
+
+const createJsonPayload = (value) => {
+  return JSON.stringify(value ?? null);
+};
+
+const getDerivedUsername = (email) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail.includes('@')) {
+    return '';
+  }
+
+  return normalizedEmail.split('@')[0].slice(0, 100);
+};
+
+const ensureUserSchema = async (connection) => {
+  await ensureColumns(connection, 'users', userColumnDefinitions);
+
+  await connection.query(
+    `UPDATE users
+     SET username = COALESCE(NULLIF(username, ''), SUBSTRING_INDEX(email, '@', 1))
+     WHERE username IS NULL OR username = ''`,
+  );
+};
+
+const ensureProfileSchema = async (connection) => {
+  await ensureColumns(connection, 'profiles', profileColumnDefinitions);
+
+  await connection.query(
+    `UPDATE profiles
+     SET username = COALESCE(NULLIF(username, ''), SUBSTRING_INDEX(email, '@', 1))
+     WHERE username IS NULL OR username = ''`,
+  );
+
+  await connection.query(
+    `UPDATE profiles
+     SET targetCareer = COALESCE(NULLIF(targetCareer, ''), career)
+     WHERE (targetCareer IS NULL OR targetCareer = '')
+       AND career IS NOT NULL
+       AND career <> ''`,
+  );
+
+  await connection.query(
+    `UPDATE profiles
+     SET career = COALESCE(NULLIF(career, ''), targetCareer)
+     WHERE (career IS NULL OR career = '')
+       AND targetCareer IS NOT NULL
+       AND targetCareer <> ''`,
+  );
+
+  const [profiles] = await connection.query('SELECT id, targetCareer, career FROM profiles');
+  for (const profile of profiles) {
+    const canonicalCareer = normalizeCareerPath(profile.targetCareer || profile.career);
+
+    if (canonicalCareer && (profile.targetCareer !== canonicalCareer || profile.career !== canonicalCareer)) {
+      await connection.query(
+        'UPDATE profiles SET targetCareer = ?, career = ? WHERE id = ?',
+        [canonicalCareer, canonicalCareer, profile.id],
+      );
+    }
+  }
+};
+
+const ensureAuditSchema = async (connection) => {
+  await connection.query(activityLogDefinitions);
+  await connection.query(userDataSnapshotDefinitions);
+};
+
+const recordActivity = async ({ email = null, userId = null, action, entityType = null, entityId = null, payload = null, ipAddress = null, userAgent = null }) => {
+  const connection = await getConnection();
+  try {
+    await connection.query(
+      `INSERT INTO activity_logs (userId, email, action, entityType, entityId, payload, ipAddress, userAgent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        email,
+        action,
+        entityType,
+        entityId,
+        createJsonPayload(payload),
+        ipAddress,
+        userAgent,
+      ],
+    );
+  } finally {
+    connection.release();
+  }
+};
+
+const upsertUserSnapshot = async ({ email = null, userId = null, category, payload = {} }) => {
+  const connection = await getConnection();
+  try {
+    await connection.query(
+      `INSERT INTO user_data_snapshots (userId, email, category, payload)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         userId = VALUES(userId),
+         payload = VALUES(payload),
+         updatedAt = CURRENT_TIMESTAMP`,
+      [userId, email, category, createJsonPayload(payload)],
+    );
+  } finally {
+    connection.release();
+  }
+};
+
+const getUserIdentity = async (email) => {
+  const connection = await getConnection();
+  try {
+    const [rows] = await connection.query('SELECT id, email FROM users WHERE email = ?', [email]);
+    return rows.length > 0 ? rows[0] : null;
+  } finally {
+    connection.release();
+  }
+};
+
+const updateUserLoginMetadata = async ({ email, ipAddress = null, userAgent = null }) => {
+  const connection = await getConnection();
+  try {
+    await connection.query(
+      `UPDATE users
+       SET lastLoginAt = CURRENT_TIMESTAMP,
+           lastLoginIp = ?,
+           lastLoginUserAgent = ?,
+           loginCount = loginCount + 1,
+           accountStatus = 'active'
+       WHERE email = ?`,
+      [ipAddress, userAgent, email],
+    );
+  } finally {
+    connection.release();
+  }
+};
+
+const seedPracticeProgressForEmail = async ({ email, careerPath }) => {
+  const connection = await getConnection();
+  try {
+    const subjects = getPracticeProgressSubjects(careerPath);
+
+    for (const subject of subjects) {
+      for (let level = 1; level <= 10; level += 1) {
+        await connection.query(
+          `INSERT IGNORE INTO practice_progress (email, subject, level, attempts, bestScore, latestScore, unlocked, completed)
+           VALUES (?, ?, ?, 0, NULL, NULL, ?, 0)`,
+          [email, subject, level, level === 1 ? 1 : 0],
+        );
+      }
+    }
+  } finally {
+    connection.release();
+  }
+};
+
+const backfillPracticeProgressForProfiles = async () => {
+  const connection = await getConnection();
+  try {
+    const [profiles] = await connection.query('SELECT email, targetCareer, career FROM profiles');
+
+    for (const profile of profiles) {
+      await seedPracticeProgressForEmail({
+        email: profile.email,
+        careerPath: normalizeCareerPath(profile.targetCareer || profile.career) || 'Engineering',
+      });
+    }
+  } finally {
+    connection.release();
+  }
+};
+
 // Create connection pool
 let pool = null;
 
@@ -45,22 +336,33 @@ const initializeDatabase = async () => {
         email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci UNIQUE NOT NULL,
         salt VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
         passwordHash VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+        username VARCHAR(100),
+        emailVerified TINYINT(1) NOT NULL DEFAULT 0,
+        accountStatus VARCHAR(20) NOT NULL DEFAULT 'active',
+        lastLoginAt TIMESTAMP NULL DEFAULT NULL,
+        lastLoginIp VARCHAR(45),
+        lastLoginUserAgent TEXT,
+        loginCount INT NOT NULL DEFAULT 0,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_email (email)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
+    await ensureUserSchema(poolConnection);
+
     // Create profiles table
     await poolConnection.query(`
       CREATE TABLE IF NOT EXISTS profiles (
         id INT AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci UNIQUE NOT NULL,
+        username VARCHAR(100),
         fullName VARCHAR(255),
         studentId VARCHAR(100),
         program VARCHAR(255),
         fatherName VARCHAR(255),
         motherName VARCHAR(255),
+        phoneNumber VARCHAR(20),
         permanentAddress TEXT,
         correspondenceAddress TEXT,
         contactNo VARCHAR(20),
@@ -68,15 +370,23 @@ const initializeDatabase = async () => {
         gender VARCHAR(50),
         classLevel VARCHAR(100),
         interests TEXT,
+        bio TEXT,
+        country VARCHAR(100),
+        state VARCHAR(100),
+        city VARCHAR(100),
         targetCareer VARCHAR(255),
+        career VARCHAR(255),
         location VARCHAR(255),
         photoUrl LONGTEXT,
+        profilePictureUrl LONGTEXT,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT profiles_ibfk_1 FOREIGN KEY (email) REFERENCES users(email) ON DELETE CASCADE,
         INDEX idx_email (email)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+
+    await ensureProfileSchema(poolConnection);
 
     await poolConnection.query(`
       CREATE TABLE IF NOT EXISTS practice_progress (
@@ -97,6 +407,10 @@ const initializeDatabase = async () => {
         CHECK (level >= 1 AND level <= 10)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+
+    await ensureAuditSchema(poolConnection);
+
+    await backfillPracticeProgressForProfiles();
 
     console.log('✓ Database tables created/verified successfully.');
     poolConnection.release();
@@ -143,9 +457,12 @@ const getConnection = async () => {
 const createUser = async (email, salt, passwordHash) => {
   const connection = await getConnection();
   try {
+    const username = getDerivedUsername(email);
     const [result] = await connection.query(
-      'INSERT INTO users (email, salt, passwordHash) VALUES (?, ?, ?)',
-      [email, salt, passwordHash]
+      `INSERT INTO users
+        (email, salt, passwordHash, username, emailVerified, accountStatus, loginCount)
+       VALUES (?, ?, ?, ?, 0, 'active', 0)`,
+      [email, salt, passwordHash, username]
     );
     return result;
   } finally {
@@ -160,7 +477,17 @@ const getUserByEmail = async (email) => {
       'SELECT * FROM users WHERE email = ?',
       [email]
     );
-    return rows.length > 0 ? rows[0] : null;
+    if (rows.length === 0) {
+      return null;
+    }
+
+    return {
+      ...rows[0],
+      username: rows[0].username || getDerivedUsername(rows[0].email),
+      emailVerified: Number(rows[0].emailVerified) || 0,
+      accountStatus: rows[0].accountStatus || 'active',
+      loginCount: Number(rows[0].loginCount) || 0,
+    };
   } finally {
     connection.release();
   }
@@ -176,6 +503,20 @@ const getAllUsers = async () => {
   }
 };
 
+const getAllProfiles = async () => {
+  const connection = await getConnection();
+  try {
+    const [rows] = await connection.query('SELECT * FROM profiles ORDER BY updatedAt DESC, createdAt DESC');
+    return rows.map((row) => ({
+      ...row,
+      targetCareer: normalizeCareerPath(row.targetCareer || row.career) || row.targetCareer || row.career || '',
+      career: normalizeCareerPath(row.career || row.targetCareer) || row.career || row.targetCareer || '',
+    }));
+  } finally {
+    connection.release();
+  }
+};
+
 // Profile operations
 const getProfileByEmail = async (email) => {
   const connection = await getConnection();
@@ -184,7 +525,22 @@ const getProfileByEmail = async (email) => {
       'SELECT * FROM profiles WHERE email = ?',
       [email]
     );
-    return rows.length > 0 ? rows[0] : null;
+    if (rows.length === 0) {
+      return null;
+    }
+
+    return {
+      ...rows[0],
+      username: rows[0].username || getDerivedUsername(rows[0].email),
+      phoneNumber: rows[0].phoneNumber || rows[0].contactNo || '',
+      bio: rows[0].bio || '',
+      country: rows[0].country || '',
+      state: rows[0].state || '',
+      city: rows[0].city || '',
+      targetCareer: normalizeCareerPath(rows[0].targetCareer || rows[0].career) || rows[0].targetCareer || rows[0].career || '',
+      career: normalizeCareerPath(rows[0].career || rows[0].targetCareer) || rows[0].career || rows[0].targetCareer || '',
+      profilePictureUrl: rows[0].profilePictureUrl || rows[0].photoUrl || '',
+    };
   } finally {
     connection.release();
   }
@@ -204,17 +560,19 @@ const createOrUpdateProfile = async (email, profileData) => {
       // Update existing profile
       const [result] = await connection.query(
         `UPDATE profiles SET 
-          fullName = ?, studentId = ?, program = ?, fatherName = ?, motherName = ?,
-          permanentAddress = ?, correspondenceAddress = ?, contactNo = ?,
-          dateOfBirth = ?, gender = ?, classLevel = ?, interests = ?,
-          targetCareer = ?, location = ?, photoUrl = ?
+          username = ?, fullName = ?, studentId = ?, program = ?, fatherName = ?, motherName = ?,
+          phoneNumber = ?, permanentAddress = ?, correspondenceAddress = ?, contactNo = ?,
+          dateOfBirth = ?, gender = ?, classLevel = ?, interests = ?, bio = ?, country = ?, state = ?, city = ?,
+          targetCareer = ?, career = ?, location = ?, photoUrl = ?, profilePictureUrl = ?
          WHERE email = ?`,
         [
+          profileData.username || getDerivedUsername(email),
           profileData.fullName,
           profileData.studentId,
           profileData.program,
           profileData.fatherName,
           profileData.motherName,
+          profileData.phoneNumber || profileData.contactNo,
           profileData.permanentAddress,
           profileData.correspondenceAddress,
           profileData.contactNo,
@@ -222,8 +580,14 @@ const createOrUpdateProfile = async (email, profileData) => {
           profileData.gender,
           profileData.classLevel,
           profileData.interests,
+          profileData.bio,
+          profileData.country,
+          profileData.state,
+          profileData.city,
+          profileData.targetCareer,
           profileData.targetCareer,
           profileData.location,
+          profileData.photoUrl,
           profileData.photoUrl,
           email,
         ]
@@ -233,17 +597,20 @@ const createOrUpdateProfile = async (email, profileData) => {
       // Create new profile
       const [result] = await connection.query(
         `INSERT INTO profiles 
-          (email, fullName, studentId, program, fatherName, motherName,
-           permanentAddress, correspondenceAddress, contactNo,
-           dateOfBirth, gender, classLevel, interests, targetCareer, location, photoUrl)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (email, username, fullName, studentId, program, fatherName, motherName,
+           phoneNumber, permanentAddress, correspondenceAddress, contactNo,
+           dateOfBirth, gender, classLevel, interests, bio, country, state, city,
+           targetCareer, career, location, photoUrl, profilePictureUrl)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           email,
+          profileData.username || getDerivedUsername(email),
           profileData.fullName,
           profileData.studentId,
           profileData.program,
           profileData.fatherName,
           profileData.motherName,
+          profileData.phoneNumber || profileData.contactNo,
           profileData.permanentAddress,
           profileData.correspondenceAddress,
           profileData.contactNo,
@@ -251,8 +618,14 @@ const createOrUpdateProfile = async (email, profileData) => {
           profileData.gender,
           profileData.classLevel,
           profileData.interests,
+          profileData.bio,
+          profileData.country,
+          profileData.state,
+          profileData.city,
+          profileData.targetCareer,
           profileData.targetCareer,
           profileData.location,
+          profileData.photoUrl,
           profileData.photoUrl,
         ]
       );
@@ -285,6 +658,24 @@ const getPracticeProgressByEmail = async (email) => {
        WHERE email = ?
        ORDER BY subject ASC, level ASC`,
       [email],
+    );
+    return rows;
+  } finally {
+    connection.release();
+  }
+};
+
+const getPracticeProgressSummary = async () => {
+  const connection = await getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT email,
+              COUNT(*) AS totalRecords,
+              SUM(completed) AS completedCount,
+              SUM(unlocked) AS unlockedCount,
+              MAX(updatedAt) AS lastActivityAt
+       FROM practice_progress
+       GROUP BY email`,
     );
     return rows;
   } finally {
@@ -336,9 +727,18 @@ module.exports = {
   createUser,
   getUserByEmail,
   getAllUsers,
+  getAllProfiles,
   getProfileByEmail,
   createOrUpdateProfile,
   deleteProfileByEmail,
   getPracticeProgressByEmail,
+  getPracticeProgressSummary,
   upsertPracticeProgressResult,
+  seedPracticeProgressForEmail,
+  backfillPracticeProgressForProfiles,
+  normalizeCareerPath,
+    recordActivity,
+    upsertUserSnapshot,
+    getUserIdentity,
+    updateUserLoginMetadata,
 };

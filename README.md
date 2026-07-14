@@ -97,4 +97,8 @@ When using Docker Compose, MySQL credentials are already set for local developme
 
 - The frontend is currently set up with a custom student-focused experience rather than the default CRA starter UI.
 - User and progress data are stored through the backend layer, with MySQL available for local development.
+<<<<<<< HEAD
 - If you want, you can add screenshots, a live demo link, or a deployment section before publishing the repository.
+=======
+- If you want, you can add screenshots, a live demo link, or a deployment section before publishing the repository.
+>>>>>>> abc97f1 (Updated AI Study Planner with latest changes)

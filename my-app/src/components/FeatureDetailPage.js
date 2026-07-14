@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 
+const apiBaseUrl = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000';
+
 const careerPriority = ['Engineering', 'Medical', 'Commerce', 'Design'];
 
 const featureCopy = {
@@ -955,6 +957,7 @@ function FeatureDetailPage({
   profileData = {},
   assessmentPerformance = {},
   isLoadingData = false,
+  currentUserEmail = '',
   onBackHome,
   onStartAssessment,
   onRefreshRecommendation,
@@ -1079,6 +1082,38 @@ function FeatureDetailPage({
   const completionPercent = studyPlan.length === 0 ? 0 : Math.round((completedPlanItems.length / studyPlan.length) * 100);
   const remainingTaskCount = Math.max(0, studyPlan.length - completedPlanItems.length);
   const dailyProgressMessage = remainingTaskCount === 0 ? 'All daily tasks completed' : `${remainingTaskCount} task(s) remaining`;
+
+  useEffect(() => {
+    if (featureTitle !== 'Study Planner') {
+      return;
+    }
+
+    const email = String(currentUserEmail || profileData.email || '').trim().toLowerCase();
+
+    if (!email) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      fetch(`${apiBaseUrl}/api/study-plan`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email,
+          plannerGoal,
+          studyPlan,
+          completedPlanItems,
+          studyHours,
+          syllabusDone,
+          subjectScores,
+        }),
+      }).catch(() => {});
+    }, 250);
+
+    return () => clearTimeout(timeoutId);
+  }, [completedPlanItems, currentUserEmail, featureTitle, plannerGoal, profileData.email, studyHours, studyPlan, subjectScores, syllabusDone]);
 
   const togglePlanItem = (item) => {
     setCompletedPlanItems((prev) => (prev.includes(item) ? prev.filter((value) => value !== item) : [...prev, item]));

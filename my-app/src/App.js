@@ -461,6 +461,9 @@ function App() {
       if (profileData.location) {
         params.set('location', profileData.location.trim());
       }
+      if (currentUserEmail) {
+        params.set('email', currentUserEmail.trim().toLowerCase());
+      }
 
       const queryString = params.toString();
       const response = await fetch(`${apiBaseUrl}/api/recommendations${queryString ? `?${queryString}` : ''}`);
@@ -478,7 +481,7 @@ function App() {
     } finally {
       setIsLoadingData(false);
     }
-  }, [profileData.classLevel, profileData.interests, profileData.location, profileData.targetCareer]);
+  }, [currentUserEmail, profileData.classLevel, profileData.interests, profileData.location, profileData.targetCareer]);
 
   const displayCareerScores = () => {
     const scoreEntries = Object.entries(careerData);
@@ -737,6 +740,7 @@ function App() {
         body: JSON.stringify({
           message: nextMessage,
           history: updatedMessages.slice(-8),
+          email: currentUserEmail,
         }),
       });
 
@@ -923,6 +927,7 @@ function App() {
         profileData={profileData}
         assessmentPerformance={assessmentPerformance}
         isLoadingData={isLoadingData}
+        currentUserEmail={currentUserEmail}
         onBackHome={() => navigateTo('/')}
         onStartAssessment={handleStartAssessment}
         onRefreshRecommendation={refreshRecommendation}
